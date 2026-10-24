@@ -38,8 +38,9 @@ Requires the .NET 8 SDK.
 dotnet build -c Release                                        # build
 dotnet publish -c Release -r win-x64 -o publish -p:PublishSingleFile=true   # single-file ~256 KB
 
-OpenLasso.exe            # GUI (process table + graph + tray)
-OpenLasso.exe --selftest # headless self-test: 8 assertions over the engine
+OpenLasso.exe                 # GUI (process table + graph + tray)
+OpenLasso.exe --minimized     # start hidden to tray (use this for autostart)
+OpenLasso.exe --selftest      # headless self-test: 8 assertions over the engine
 ```
 
 > Run as administrator to manage processes of other users; without elevation the engine degrades gracefully (failed actions are logged, never fatal).

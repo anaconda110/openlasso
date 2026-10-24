@@ -8,14 +8,26 @@ public class IniFile
     private readonly List<(string section, string key, string value)> _items = new();
     public string Path { get; }
 
-    public IniFile(string path) { Path = path; if (File.Exists(path)) Parse(File.ReadAllLines(path, Encoding.UTF8)); }
+    public IniFile(string path)
+    {
+        Path = path;
+        if (File.Exists(path))
+        {
+            var bom = File.ReadAllBytes(path);
+            Encoding enc = new UTF8Encoding(true);
+            if (bom.Length >= 2 && bom[0] == 0xFF && bom[1] == 0xFE) enc = Encoding.Unicode;          // UTF-16 LE（prolasso.ini 实际编码）
+            else if (bom.Length >= 2 && bom[0] == 0xFE && bom[1] == 0xFF) enc = Encoding.BigEndianUnicode;
+            else if (bom.Length >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) enc = new UTF8Encoding(false);
+            Parse(File.ReadAllLines(path, enc));
+        }
+    }
 
     private void Parse(string[] lines)
     {
         string sec = "";
         foreach (var raw in lines)
         {
-            var line = raw.Trim();
+            var line = raw.Trim().TrimStart('\uFEFF');
             if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
             if (line.StartsWith('[') && line.EndsWith(']')) { sec = line[1..^1].Trim(); continue; }
             int eq = line.IndexOf('=');

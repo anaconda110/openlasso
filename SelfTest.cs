@@ -20,6 +20,7 @@ static class SelfTest
         // 1. 配置与引擎
         var cfg = new LassoConfig(AppPaths.ConfigPath);
         var log = new ActionLog(AppPaths.LogDir);
+        P($"[*] 配置规则解析: 优先级 {IniFile.ParsePairs(cfg.DefaultPriorities).Count} IO {IniFile.ParsePairs(cfg.DefaultIoPriorities).Count} 亲和 {IniFile.ParsePairs(cfg.DefaultAffinities).Count} 黑名单 {IniFile.SplitList(cfg.Disallowed).Count} ProBalance排除 {cfg.ProBalanceExclusions.Count} SmartTrim={(cfg.SmartTrimEnabled ? "开" : "关")} ProBalance={(cfg.ProBalanceEnabled ? "开" : "关")}");
         var eng = new GovernorEngine(cfg, log);
         eng.Config.DefaultPriorities = "pingsleep.exe,idle";       // 注入测试规则
         eng.Config.InstanceLimits = "";

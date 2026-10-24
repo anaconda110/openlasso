@@ -18,7 +18,8 @@ static class Program
         if (!createdFirst) { MessageBox.Show("OpenLasso 已在运行。", "OpenLasso", MessageBoxButtons.OK, MessageBoxIcon.Information); return 0; }
 
         ApplicationConfiguration.Initialize();
-        using var form = new MainForm();
+        bool minimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+        using var form = new MainForm(minimized);
         Application.Run(form);
         return 0;
     }

@@ -23,6 +23,8 @@ public class MainForm : Form
     bool _reallyExit;
     int _tick;
     IntPtr _hIcon;
+    readonly bool _startHidden;
+    volatile bool _allowShow;
 
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
@@ -33,8 +35,9 @@ public class MainForm : Form
         ("低于正常", "below normal", ProcessPriorityClass.BelowNormal), ("空闲", "idle", ProcessPriorityClass.Idle),
     };
 
-    public MainForm()
+    public MainForm(bool startHidden = false)
     {
+        _startHidden = startHidden;
         _cfg = new LassoConfig(AppPaths.ConfigPath);
         _log = new ActionLog(AppPaths.LogDir);
         _eng = new GovernorEngine(_cfg, _log);
@@ -48,13 +51,21 @@ public class MainForm : Form
         _tray = new NotifyIcon { Text = "OpenLasso", Visible = true, ContextMenuStrip = BuildTrayMenu() };
         _hIcon = MakeIcon(0);
         _tray.Icon = Icon.FromHandle(_hIcon);
-        _tray.DoubleClick += (s, e) => { Show(); Activate(); };
+        _tray.DoubleClick += (s, e) => ShowFromTray();
         _timer.Tick += (s, e) => RefreshView();
         _eng.Start();
         _timer.Start();
         FormClosing += (s, e) => { if (!_reallyExit) { e.Cancel = true; Hide(); } };
         FormClosed += (s, e) => { _tray.Visible = false; _eng.Dispose(); };
     }
+
+    // --minimized 启动：首次不显示窗口（托盘可用），从托盘打开后恢复常规显示语义
+    protected override void SetVisibleCore(bool value)
+    {
+        if (_startHidden && !_allowShow) value = false;
+        base.SetVisibleCore(value);
+    }
+    void ShowFromTray() { _allowShow = true; Show(); Activate(); }
 
     void BuildMenu()
     {
@@ -221,7 +232,7 @@ public class MainForm : Form
     ContextMenuStrip BuildTrayMenu()
     {
         var m = new ContextMenuStrip();
-        m.Items.Add("显示主窗口", null, (s, e) => { Show(); Activate(); });
+        m.Items.Add("显示主窗口", null, (s, e) => ShowFromTray());
         var mPause = new ToolStripMenuItem("暂停引擎");
         mPause.Click += (s, e) => { _eng.Paused = !_eng.Paused; mPause.Text = _eng.Paused ? "恢复引擎" : "暂停引擎"; };
         m.Items.Add(mPause);
