@@ -28,13 +28,14 @@ public class GraphControl : Control
         var cur = _hist.Count > 0 ? _hist[^1] : 0;
         g.DrawString($"{Title}  {cur:0.0}%", Font, fg, 4, 2);
         if (_hist.Count < 2) return;
-        // 折线
-        var pts = new PointF[_hist.Count];
-        for (int i = 0; i < _hist.Count; i++)
+        // 横轴按当前采样数铺满全宽（从左生长），攒满 Capacity 后自然过渡为整幅滚动曲线
+        int n = _hist.Count;
+        float step = Width / (float)(n - 1);
+        var pts = new PointF[n];
+        for (int i = 0; i < n; i++)
         {
-            float x = Width - (_hist.Count - 1 - i) * (Width / (float)(Capacity - 1));
             float y = Height - 4 - (float)(_hist[i] / 100.0 * (Height - 16));
-            pts[i] = new PointF(Math.Max(0, x), y);
+            pts[i] = new PointF(i * step, y);
         }
         var fillPts = pts.ToList();
         fillPts.Insert(0, new PointF(fillPts[0].X, Height));
