@@ -7,7 +7,7 @@
 
 ![screenshot](docs/screenshot.png)
 
-**中文说明**：OpenLasso 是一个 Windows 进程优化器的开源实现，功能对标 Process Lasso 的核心引擎——CPU 超载时自动抑制后台进程（ProBalance 式）、智能内存整理（SmartTrim 式）、持久化进程规则（优先级/亲和性/IO 优先级/CPU 集/能效模式/实例限制/CPU 限额/黑名单/看门狗/保活）、电源计划自动化，并提供带 CPU 曲线与托盘图标的图形界面。**可直接读取现有 `prolasso.ini` 配置**。
+**中文说明**：OpenLasso 是一个 Windows 进程优化器的开源实现，功能对标 Process Lasso 的核心引擎——CPU 超载时自动抑制后台进程（ProBalance 式）、智能内存整理（SmartTrim 式）、持久化进程规则（优先级/亲和性/IO 优先级/CPU 集/能效模式/实例限制/CPU 限额/黑名单/看门狗/保活）、电源计划自动化，并提供带 CPU / GPU / 内存占用曲线与托盘图标的图形界面。**可直接读取现有 `prolasso.ini` 配置**。
 
 ## Features
 
@@ -27,7 +27,8 @@
 | IdleSaver / load-based power switching | ✅ | Switches power schemes by idle time or rolling CPU average |
 | CSV action log | ✅ | Same column layout as the original's log, rotated ×10, compatible action IDs |
 | Config compatibility | ✅ | Reads existing `prolasso.ini`-style INI on first run (sections/keys aligned) |
-| GUI | ✅ | Process table (sortable), CPU graph, dynamic tray icon (CPU %), rule & settings editors, headless self-test mode |
+| GUI | ✅ | Sortable process table, CPU / GPU / memory usage graph, dynamic tray icon (CPU %), rule & settings editors, headless self-test mode |
+| GPU monitoring | ✅ | Reads the busiest Windows GPU Engine counter through PDH and shows its friendly engine name; CPU and memory monitoring continue to work when unavailable |
 | GPU priorities, responsiveness graph, multi-language, service/session-agent split | ❌ | Out of scope for v1 (see Design notes) |
 
 ## Build & Run
@@ -40,7 +41,7 @@ dotnet publish -c Release -r win-x64 -o publish -p:PublishSingleFile=true   # si
 
 OpenLasso.exe                 # GUI (process table + graph + tray)
 OpenLasso.exe --minimized     # start hidden to tray (use this for autostart)
-OpenLasso.exe --selftest      # headless self-test: 8 assertions over the engine
+OpenLasso.exe --selftest      # headless regression checks for config, telemetry, GPU sampling, engine and UI logic
 ```
 
 > Run as administrator to manage processes of other users; without elevation the engine degrades gracefully (failed actions are logged, never fatal).
@@ -76,9 +77,10 @@ Patterns support `*` / `?` wildcards and match both the process name and (for pa
 ## Design notes
 
 - **One process, one engine.** The original splits into a session-0 service (`ProcessGovernor.exe`), a per-session agent, and a GUI synchronised via named kernel events and a hidden notification window. OpenLasso runs the engine as a background thread inside the GUI process — no service, no session bridge, no elevation required for the basics.
-- **Polling model.** Process enumeration is a 1 s `System.Diagnostics.Process` snapshot with per-PID CPU-time deltas (total CPU from `GetSystemTimes`), the same low-overhead approach as the original's `NtQuerySystemInformation` polling.
+- **Polling model.** Process enumeration uses a configurable `System.Diagnostics.Process` snapshot with per-PID CPU-time deltas (total CPU from `GetSystemTimes`). Expensive image metadata and current-user SID lookups are cached, failed SID checks back off, the process table refreshes no faster than once per second, and its batch update pauses while the window is hidden or minimized.
+- **Usage telemetry.** CPU and memory are sampled directly; GPU utilization comes from the English `GPU Engine` PDH counter, grouped by adapter and engine type. The busiest engine drives the whole-machine GPU reading and its label, while a missing GPU counter degrades to an unavailable state without affecting other telemetry.
 - **Everything through public APIs.** Priority, affinity, CPU sets, IO/memory priority, Eco mode, working-set trim, power schemes — all documented (or widely known) Windows APIs; no undocumented hooks, no drivers.
-- **Verified headlessly.** `--selftest` spawns a sacrificial process and asserts snapshot capture, priority/affinity set + read-back, working-set trim, termination, and log output; the same assertions run in CI.
+- **Verified headlessly.** `--selftest` uses unique temporary processes and isolated configuration paths, then checks snapshot capture, priority/affinity set + read-back, working-set trim, termination, logging, GPU aggregation, config round-trips, concurrent SmartTrim calls and core UI helpers. The same checks can run in CI.
 
 ## Disclaimer
 

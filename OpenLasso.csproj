@@ -10,7 +10,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>1.0.0</Version>
     <Product>OpenLasso</Product>
-    <Description>开源进程优化器 — Process Lasso 核心功能复刻</Description>
+    <Description>开源进程优化器 — 兼容 Process Lasso 核心功能</Description>
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 </Project>

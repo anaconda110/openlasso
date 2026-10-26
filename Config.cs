@@ -1,43 +1,89 @@
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace OpenLasso;
 
-/// <summary>可回写的 INI（保持段落顺序与未知键，UTF-8 BOM，兼容 Process Lasso 的 prolasso.ini）</summary>
+/// <summary>可回写的 INI：保留注释、空行、段落顺序、未知键和原文件编码。</summary>
 public class IniFile
 {
-    private readonly List<(string section, string key, string value)> _items = new();
+    private sealed class Entry
+    {
+        public string Section = "";
+        public string Key = "";
+        public string Value = "";
+        public int LineIndex;
+    }
+
+    private readonly List<string> _lines = new();
+    private readonly List<Entry> _items = new();
+    private readonly Encoding _encoding;
+    private readonly bool _emitPreamble;
+
     public string Path { get; }
 
     public IniFile(string path)
     {
         Path = path;
-        if (File.Exists(path))
-        {
-            var bom = File.ReadAllBytes(path);
-            Encoding enc = new UTF8Encoding(true);
-            if (bom.Length >= 2 && bom[0] == 0xFF && bom[1] == 0xFE) enc = Encoding.Unicode;          // UTF-16 LE（prolasso.ini 实际编码）
-            else if (bom.Length >= 2 && bom[0] == 0xFE && bom[1] == 0xFF) enc = Encoding.BigEndianUnicode;
-            else if (bom.Length >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) enc = new UTF8Encoding(false);
-            Parse(File.ReadAllLines(path, enc));
-        }
+        if (!File.Exists(path)) { _encoding = new UTF8Encoding(true); _emitPreamble = true; return; }
+
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+        { _encoding = Encoding.Unicode; _emitPreamble = true; }
+        else if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+        { _encoding = Encoding.BigEndianUnicode; _emitPreamble = true; }
+        else if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        { _encoding = new UTF8Encoding(true); _emitPreamble = true; }
+        else
+        { _encoding = new UTF8Encoding(false); _emitPreamble = false; }
+
+        string text = _encoding.GetString(bytes, _emitPreamble && bytes.Length >= 3 && bytes[0] == 0xEF ? 3 :
+            (_emitPreamble && bytes.Length >= 2 ? 2 : 0), bytes.Length - (_emitPreamble && bytes.Length >= 3 && bytes[0] == 0xEF ? 3 :
+            (_emitPreamble && bytes.Length >= 2 ? 2 : 0)));
+        _lines.AddRange(text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'));
+        RebuildIndex();
     }
 
-    private void Parse(string[] lines)
+    private IniFile(string path, IEnumerable<string> lines, Encoding encoding, bool emitPreamble)
     {
-        string sec = "";
-        foreach (var raw in lines)
+        Path = path;
+        _lines.AddRange(lines);
+        _encoding = encoding;
+        _emitPreamble = emitPreamble;
+        RebuildIndex();
+    }
+
+    public IniFile Clone() => new(Path, _lines, _encoding, _emitPreamble);
+
+    private void RebuildIndex()
+    {
+        _items.Clear();
+        string section = "";
+        for (int i = 0; i < _lines.Count; i++)
         {
-            var line = raw.Trim().TrimStart('\uFEFF');
-            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
-            if (line.StartsWith('[') && line.EndsWith(']')) { sec = line[1..^1].Trim(); continue; }
-            int eq = line.IndexOf('=');
+            string syntax = _lines[i].Trim().TrimStart('\uFEFF');
+            if (syntax.Length == 0 || syntax.StartsWith(';') || syntax.StartsWith('#')) continue;
+            if (syntax.StartsWith('[') && syntax.EndsWith(']'))
+            { section = syntax[1..^1].Trim(); continue; }
+            int eq = syntax.IndexOf('=');
             if (eq <= 0) continue;
-            _items.Add((sec, line[..eq].Trim(), line[(eq + 1)..].Trim()));
+            _items.Add(new Entry
+            {
+                Section = section,
+                Key = syntax[..eq].Trim(),
+                Value = syntax[(eq + 1)..].Trim(),
+                LineIndex = i,
+            });
         }
     }
 
     public string Get(string sec, string key, string def = "")
-    { var i = IndexOf(sec, key); return i >= 0 ? _items[i].value : def; }
+    {
+        int i = _items.FindLastIndex(x => x.Section.Equals(sec, StringComparison.OrdinalIgnoreCase) &&
+                                          x.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 ? _items[i].Value : def;
+    }
 
     public bool GetBool(string sec, string key, bool def)
     { var s = Get(sec, key); return bool.TryParse(s, out var b) ? b : def; }
@@ -46,21 +92,60 @@ public class IniFile
     { var s = Get(sec, key); return int.TryParse(s, out var v) ? v : def; }
 
     public double GetDouble(string sec, string key, double def)
-    { var s = Get(sec, key); return double.TryParse(s, out var v) ? v : def; }
+    {
+        var s = Get(sec, key);
+        return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ||
+               double.TryParse(s, out v) ? v : def;
+    }
 
     public void Set(string sec, string key, string value)
     {
-        var i = IndexOf(sec, key);
-        if (i >= 0) _items[i] = (sec, key, value);
+        int itemIndex = _items.FindLastIndex(x => x.Section.Equals(sec, StringComparison.OrdinalIgnoreCase) &&
+                                                  x.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+        if (itemIndex >= 0)
+        {
+            var item = _items[itemIndex];
+            int eq = _lines[item.LineIndex].IndexOf('=');
+            string prefix = eq >= 0 ? _lines[item.LineIndex][..(eq + 1)] : item.Key + "=";
+            _lines[item.LineIndex] = prefix + value;
+            item.Value = value;
+            return;
+        }
+
+        int sectionLine = FindSectionLine(sec);
+        string newLine = key + "=" + value;
+        if (sectionLine < 0)
+        {
+            if (_lines.Count > 0 && _lines[^1].Length != 0) _lines.Add("");
+            _lines.Add("[" + sec + "]");
+            _lines.Add(newLine);
+        }
         else
         {
-            int insert = _items.FindLastIndex(x => x.section.Equals(sec, StringComparison.OrdinalIgnoreCase));
-            _items.Insert(insert + 1, (sec, key, value));
+            int insertAt = sectionLine + 1;
+            int lastDataLine = sectionLine;
+            for (int i = sectionLine + 1; i < _lines.Count; i++)
+            {
+                string syntax = _lines[i].Trim();
+                if (syntax.StartsWith('[') && syntax.EndsWith(']')) break;
+                if (syntax.Length > 0 && !syntax.StartsWith(';') && !syntax.StartsWith('#')) lastDataLine = i;
+            }
+            if (lastDataLine > sectionLine) insertAt = lastDataLine + 1;
+            _lines.Insert(insertAt, newLine);
         }
+        RebuildIndex();
     }
 
-    private int IndexOf(string sec, string key)
-        => _items.FindIndex(x => x.section.Equals(sec, StringComparison.OrdinalIgnoreCase) && x.key.Equals(key, StringComparison.OrdinalIgnoreCase));
+    private int FindSectionLine(string sec)
+    {
+        for (int i = 0; i < _lines.Count; i++)
+        {
+            string syntax = _lines[i].Trim().TrimStart('\uFEFF');
+            if (syntax.StartsWith('[') && syntax.EndsWith(']') &&
+                syntax[1..^1].Trim().Equals(sec, StringComparison.OrdinalIgnoreCase)) return i;
+        }
+        return -1;
+    }
 
     /// <summary>逗号分隔对列表："a.exe,v1,b.exe,v2" → [(a.exe,v1),(b.exe,v2)]</summary>
     public static List<(string name, string val)> ParsePairs(string s)
@@ -71,7 +156,7 @@ public class IniFile
         return r;
     }
 
-    /// <summary>逗号分隔列表（空项剔除，转义 \, 视为字面逗号——与 PL 转义规则一致）</summary>
+    /// <summary>逗号分隔列表（空项剔除，转义 \, 视为字面逗号）。</summary>
     public static List<string> SplitList(string s)
     {
         var outp = new List<string>();
@@ -89,22 +174,52 @@ public class IniFile
     }
 
     public static string JoinList(IEnumerable<string> items) => string.Join(",", items.Select(Escape));
-
     private static string Escape(string s) => s.Replace(",", "\\,");
 
     public void Save()
     {
-        var dir = System.IO.Path.GetDirectoryName(Path);
+        string dir = System.IO.Path.GetDirectoryName(Path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        var sb = new StringBuilder();
-        string cur = null;
-        foreach (var (sec, key, value) in _items)
+        string temp = Path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
         {
-            if (!string.Equals(sec, cur, StringComparison.OrdinalIgnoreCase))
-            { sb.Append('[').Append(sec).Append(']').AppendLine(); cur = sec; }
-            sb.Append(key).Append('=').Append(value).AppendLine();
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                using (var writer = new StreamWriter(stream, _encoding, 4096, leaveOpen: true))
+                {
+                    writer.NewLine = "\r\n";
+                    foreach (string line in _lines) writer.WriteLine(line);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
+            }
+
+            if (File.Exists(Path))
+            {
+                try { File.Replace(temp, Path, null, ignoreMetadataErrors: true); }
+                catch
+                {
+                    string backup = Path + ".bak-" + Guid.NewGuid().ToString("N");
+                    try
+                    {
+                        File.Copy(Path, backup, overwrite: true);
+                        File.Copy(temp, Path, overwrite: true);
+                    }
+                    catch
+                    {
+                        try { if (File.Exists(backup)) File.Copy(backup, Path, overwrite: true); }
+                        catch { }
+                        throw;
+                    }
+                    finally { try { if (File.Exists(backup)) File.Delete(backup); } catch { } }
+                }
+            }
+            else File.Move(temp, Path);
         }
-        File.WriteAllText(Path, sb.ToString(), new UTF8Encoding(true));
+        finally
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+        }
     }
 }
 
@@ -154,22 +269,36 @@ public class LassoConfig
     public bool IdleSaverEnabled; public int IdleSaverIdleSec = 300; public string IdleSaverPlan = "节能";
     public bool LoadPowerEnabled; public double LoadLowPct = 10, LoadHighPct = 50; public string LoadLowPlan = "节能", LoadHighPlan = "高性能";
 
-    public LassoConfig(string path)
+    public LassoConfig(string path, bool importFromProcessLasso = true, string processLassoConfigPath = null)
     {
         ConfigPath = path;
         ConfigDir = Path.GetDirectoryName(path);
         Ini = new IniFile(path);
         Reload();
-        // 首次运行且无配置：尝试从 Process Lasso 导入（只读）
-        if (!File.Exists(path))
+        // 首次运行且无配置：复制一份 Process Lasso 配置用于导入。
+        // Ini 始终绑定 OpenLasso 自有路径，后续保存绝不能写回真实 prolasso.ini。
+        if (!File.Exists(path) && importFromProcessLasso)
         {
-            string plIni = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ProcessLasso", "config", "prolasso.ini");
+            string plIni = processLassoConfigPath ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "ProcessLasso", "config", "prolasso.ini");
             if (File.Exists(plIni))
             {
-                Ini = new IniFile(plIni);
-                Reload();
-                ConfigPath = path; // 保持自己的落盘路径
-                ImportedFrom = plIni;
+                try
+                {
+                    if (!string.IsNullOrEmpty(ConfigDir)) Directory.CreateDirectory(ConfigDir);
+                    File.Copy(plIni, ConfigPath, overwrite: false);
+                    Ini = new IniFile(ConfigPath);
+                    Reload();
+                    ImportedFrom = plIni;
+                }
+                catch
+                {
+                    // 导入失败时继续使用 OpenLasso 自己的配置路径，不影响后续保存。
+                    ImportedFrom = null;
+                    Ini = new IniFile(ConfigPath);
+                    Reload();
+                }
             }
         }
     }
@@ -194,7 +323,11 @@ public class LassoConfig
         ProBalanceExclusions = IniFile.SplitList(i.Get("OutOfControlProcessRestraint", "OocExclusions"));
 
         FgBoostEnabled = i.GetBool("ForegroundBoosting", "BoostForegroundProcess", false);
-        FgBoostPriority = ParsePriorityToken(i.Get("ForegroundBoosting", "ForegroundBoostPriorityClass", "0x8000"));
+        {
+            string boost = i.Get("ForegroundBoosting", "ForegroundBoostPriorityClass", "0x8000");
+            FgBoostPriority = TryParsePriority(boost, out var boostPriority)
+                ? (int)boostPriority : (int)System.Diagnostics.ProcessPriorityClass.AboveNormal;
+        }
         FgBoostOnlyNormal = i.GetBool("ForegroundBoosting", "BoostOnlyNormal", true);
 
         SmartTrimEnabled = i.GetBool("MemoryManagement", "SmartTrimIsEnabled", true);
@@ -211,7 +344,8 @@ public class LassoConfig
         DefaultMemPriorities = i.Get("ProcessDefaults", "DefaultMemoryPriorities");
         DefaultAffinities = i.Get("ProcessDefaults", "DefaultAffinitiesEx");
         DefaultCpuSets = i.Get("ProcessDefaults", "CPUSets");
-        EfficiencyModes = i.Get("ProcessAllowances", "EfficiencyMode");
+        EfficiencyModes = i.Get("ProcessAllowances", "EfficiencyMode",
+            i.Get("ProcessAllowances", "EfficiencyModes"));
         InstanceLimits = i.Get("ProcessAllowances", "InstanceLimitedProcesses");
         CpuLimits = i.Get("ProcessAllowances", "CPULimitRules", i.Get("ProcessAllowances", "ProcessThrottles"));
         Disallowed = i.Get("ProcessAllowances", "DisallowedProcesses");
@@ -221,34 +355,49 @@ public class LassoConfig
 
         IdleSaverEnabled = i.GetBool("PowerSaver", "EnergySaverEnabled", false);
         IdleSaverIdleSec = i.GetInt("PowerSaver", "PowerSaver_IdleTime", 300);
+        IdleSaverPlan = i.Get("PowerSaver", "PowerSaver_IdlePlan", "节能");
         LoadPowerEnabled = i.GetBool("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherEnabled", false);
         LoadLowPct = i.GetDouble("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherLowCPULoadThreshold", 10);
         LoadHighPct = i.GetDouble("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherHighCPULoadThreshold", 50);
+        LoadLowPlan = i.Get("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherLowPlan", "节能");
+        LoadHighPlan = i.Get("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherHighPlan", "高性能");
     }
 
     public void Save()
     {
-        var i = Ini;
+        // 所有写入先落在副本上，失败时保持当前内存配置和原文件不变。
+        var i = Ini.Clone();
         i.Set("OutOfControlProcessRestraint", "OocOn", ProBalanceEnabled.ToString());
         i.Set("OutOfControlProcessRestraint", "TotalProcessorUsageBeforeRestraint", TotalCpuBeforeRestraint.ToString());
         i.Set("OutOfControlProcessRestraint", "PerProcessUsageBeforeRestraint", PerProcessCpuBeforeRestraint.ToString());
         i.Set("OutOfControlProcessRestraint", "TimeOverQuotaBeforeRestraint", TimeOverQuotaMs.ToString());
         i.Set("OutOfControlProcessRestraint", "PerProcessUsageForRestore", PerProcessCpuForRestore.ToString());
         i.Set("OutOfControlProcessRestraint", "MinimumTimeOfRestraint", MinRestraintMs.ToString());
+        i.Set("OutOfControlProcessRestraint", "TameOnlyNormal", TameOnlyNormal.ToString());
+        i.Set("OutOfControlProcessRestraint", "LowerIOPriorityDuringRestraint", LowerIoOnRestraint.ToString());
+        i.Set("OutOfControlProcessRestraint", "LowerToIdleInsteadOfBelowNormal", LowerToIdle.ToString());
+        i.Set("OutOfControlProcessRestraint", "ExcludeForegroundProcesses2", ExcludeForeground.ToString());
+        i.Set("OutOfControlProcessRestraint", "ExcludeChildrenOfForeground", ExcludeChildrenOfForeground.ToString());
+        i.Set("OutOfControlProcessRestraint", "ExcludeServices", ExcludeServices.ToString());
+        i.Set("OutOfControlProcessRestraint", "DisableProBalanceIfSysIdleThisManyMS", DisableWhenIdleMs.ToString());
         i.Set("OutOfControlProcessRestraint", "OocExclusions", IniFile.JoinList(ProBalanceExclusions));
         i.Set("ForegroundBoosting", "BoostForegroundProcess", FgBoostEnabled.ToString());
+        i.Set("ForegroundBoosting", "ForegroundBoostPriorityClass", "0x" + FgBoostPriority.ToString("X"));
+        i.Set("ForegroundBoosting", "BoostOnlyNormal", FgBoostOnlyNormal.ToString());
         i.Set("MemoryManagement", "SmartTrimIsEnabled", SmartTrimEnabled.ToString());
         i.Set("MemoryManagement", "SmartTrimAutoMinimumRAMLoad", SmartTrimMinRamLoad.ToString());
         i.Set("MemoryManagement", "MinimumProcessWSSInMb", SmartTrimMinWssMb.ToString());
         i.Set("MemoryManagement", "SmartTrimIntervalMins", SmartTrimIntervalMin.ToString());
+        i.Set("MemoryManagement", "SmartTrimExclusions", IniFile.JoinList(SmartTrimExclusions));
         i.Set("Performance", "UpdateSpeedCore", UpdateSpeedMs.ToString());
+        i.Set("Performance", "ManageOnlyCurrentUser", ManageOnlyCurrentUser.ToString());
         i.Set("ProcessDefaults", "DefaultPriorities", DefaultPriorities);
         i.Set("ProcessDefaults", "DefaultIOPriorities", DefaultIoPriorities);
         i.Set("ProcessDefaults", "DefaultMemoryPriorities", DefaultMemPriorities);
         i.Set("ProcessDefaults", "DefaultAffinitiesEx", DefaultAffinities);
         i.Set("ProcessDefaults", "CPUSets", DefaultCpuSets);
         i.Set("ProcessDefaults", "KeepRunningProcessesEx", KeepRunning);
-        i.Set("ProcessAllowances", "EfficiencyModes", EfficiencyModes);
+        i.Set("ProcessAllowances", "EfficiencyMode", EfficiencyModes);
         i.Set("ProcessAllowances", "InstanceLimitedProcesses", InstanceLimits);
         i.Set("ProcessAllowances", "CPULimitRules", CpuLimits);
         i.Set("ProcessAllowances", "DisallowedProcesses", Disallowed);
@@ -256,51 +405,100 @@ public class LassoConfig
         i.Set("AdvancedRules", "WatchdogRules2", WatchdogRules);
         i.Set("PowerSaver", "EnergySaverEnabled", IdleSaverEnabled.ToString());
         i.Set("PowerSaver", "PowerSaver_IdleTime", IdleSaverIdleSec.ToString());
+        i.Set("PowerSaver", "PowerSaver_IdlePlan", IdleSaverPlan);
         i.Set("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherEnabled", LoadPowerEnabled.ToString());
+        i.Set("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherLowCPULoadThreshold",
+            LoadLowPct.ToString(CultureInfo.InvariantCulture));
+        i.Set("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherHighCPULoadThreshold",
+            LoadHighPct.ToString(CultureInfo.InvariantCulture));
+        i.Set("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherLowPlan", LoadLowPlan);
+        i.Set("LoadBasedPowerSwitcher", "LoadBasedPowerSwitcherHighPlan", LoadHighPlan);
         i.Set("Administration", "Version", "1000000");
         i.Save();
+        Ini = new IniFile(ConfigPath);
+        // 回读实际落盘内容，确保调用方看到的是持久化后的值。
+        Reload();
     }
 
-    /// <summary>优先级文本/数字 → ProcessPriorityClass（"real time"/"high"/"above normal"/"normal"/"below normal"/"idle" 或 0x 值）</summary>
+    /// <summary>优先级文本/数字 → ProcessPriorityClass；非法值沿用 Normal 以兼容旧配置。</summary>
     public static System.Diagnostics.ProcessPriorityClass ParsePriority(string tok)
+        => TryParsePriority(tok, out var pri) ? pri : System.Diagnostics.ProcessPriorityClass.Normal;
+
+    public static bool TryParsePriority(string tok, out System.Diagnostics.ProcessPriorityClass priority)
     {
-        int v = ParsePriorityToken(tok);
-        return v switch
+        priority = System.Diagnostics.ProcessPriorityClass.Normal;
+        if (string.IsNullOrWhiteSpace(tok)) return false;
+        string t = tok.Trim().ToLowerInvariant().Replace('_', ' ').Replace('-', ' ');
+        if (t.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
-            0x100 => System.Diagnostics.ProcessPriorityClass.RealTime,
-            0x80 => System.Diagnostics.ProcessPriorityClass.High,
-            0x8000 => System.Diagnostics.ProcessPriorityClass.AboveNormal,
+            if (!int.TryParse(t[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int hex)) return false;
+            return TryMapNativePriority(hex, out priority);
+        }
+        if (int.TryParse(t, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
+        {
+            // 兼容旧版 0..4 序号。
+            int native = number switch { 4 => 0x100, 3 => 0x80, 2 => 0x8000, 1 => 0x4000, 0 => 0x40, _ => number };
+            return TryMapNativePriority(native, out priority);
+        }
+        priority = t switch
+        {
+            "real time" or "realtime" => System.Diagnostics.ProcessPriorityClass.RealTime,
+            "high" => System.Diagnostics.ProcessPriorityClass.High,
+            "above normal" => System.Diagnostics.ProcessPriorityClass.AboveNormal,
+            "normal" => System.Diagnostics.ProcessPriorityClass.Normal,
+            "below normal" => System.Diagnostics.ProcessPriorityClass.BelowNormal,
+            "idle" or "low" => System.Diagnostics.ProcessPriorityClass.Idle,
+            _ => (System.Diagnostics.ProcessPriorityClass)(-1),
+        };
+        if ((int)priority == -1)
+        {
+            priority = System.Diagnostics.ProcessPriorityClass.Normal;
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryMapNativePriority(int value, out System.Diagnostics.ProcessPriorityClass priority)
+    {
+        priority = value switch
+        {
+            0x20 => System.Diagnostics.ProcessPriorityClass.Normal,
             0x40 => System.Diagnostics.ProcessPriorityClass.Idle,
+            0x80 => System.Diagnostics.ProcessPriorityClass.High,
+            0x100 => System.Diagnostics.ProcessPriorityClass.RealTime,
             0x4000 => System.Diagnostics.ProcessPriorityClass.BelowNormal,
-            _ => System.Diagnostics.ProcessPriorityClass.Normal,
+            0x8000 => System.Diagnostics.ProcessPriorityClass.AboveNormal,
+            _ => (System.Diagnostics.ProcessPriorityClass)(-1),
         };
-    }
-
-    static int ParsePriorityToken(string tok)
-    {
-        tok = tok.Trim();
-        if (tok.StartsWith("0x", StringComparison.OrdinalIgnoreCase) && int.TryParse(tok[2..], System.Globalization.NumberStyles.HexNumber, null, out var hx)) return hx;
-        if (int.TryParse(tok, out var d))
-            return d switch { 4 => 0x100, 3 => 0x80, 2 => 0x8000, 1 => 0x4000, 0 => 0x40, _ => d };
-        return tok.ToLowerInvariant() switch
+        if ((int)priority == -1)
         {
-            "real time" or "realtime" => 0x100, "high" => 0x80, "above normal" => 0x8000,
-            "below normal" => 0x4000, "idle" => 0x40, _ => 0x20,
-        };
+            priority = System.Diagnostics.ProcessPriorityClass.Normal;
+            return false;
+        }
+        return true;
     }
 
-    /// <summary>进程名/路径匹配（支持 * ? 通配，大小写不敏感；pattern 可匹配 basename 或完整路径）</summary>
+    private static readonly ConcurrentDictionary<string, Regex> PatternCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>进程名/路径匹配（支持 * ? 通配，大小写不敏感；无通配名称也接受省略 .exe）。</summary>
     public static bool MatchPattern(string pattern, string procName, string procPath)
     {
-        if (string.IsNullOrEmpty(pattern)) return false;
-        var rx = "^" + System.Text.RegularExpressions.Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".") + "$";
-        var opts = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
-        if (System.Text.RegularExpressions.Regex.IsMatch(procName, rx, opts)) return true;
-        if (!string.IsNullOrEmpty(procPath) && System.Text.RegularExpressions.Regex.IsMatch(procPath, rx, opts)) return true;
-        // 无通配时做后缀匹配：pattern 不带 .exe 也命中
-        if (!pattern.Contains('*') && !pattern.Contains('?') && !pattern.Contains('\\') && !pattern.Contains('/'))
+        if (string.IsNullOrWhiteSpace(pattern)) return false;
+        pattern = pattern.Trim();
+        procName ??= "";
+        procPath ??= "";
+
+        bool hasWildcard = pattern.IndexOfAny(new[] { '*', '?' }) >= 0;
+        if (!hasWildcard && pattern.IndexOfAny(new[] { '\\', '/' }) < 0)
+        {
             return procName.Equals(pattern, StringComparison.OrdinalIgnoreCase) ||
-                   procName.Equals(pattern + ".exe", StringComparison.OrdinalIgnoreCase);
-        return false;
+                   (!pattern.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+                    procName.Equals(pattern + ".exe", StringComparison.OrdinalIgnoreCase));
+        }
+
+        var regex = PatternCache.GetOrAdd(pattern, static p =>
+            new Regex("^" + Regex.Escape(p).Replace(@"\*", ".*").Replace(@"\?", ".") + "$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled));
+        return regex.IsMatch(procName) || (procPath.Length > 0 && regex.IsMatch(procPath));
     }
 }

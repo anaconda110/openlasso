@@ -35,12 +35,17 @@ public class ActionLog
     readonly string _file;
     readonly object _lock = new();
     const long MaxBytes = 512 * 1024;
+    long _readOffset;
+    long _readLength = -1;
+    DateTime _readCreationUtc = DateTime.MinValue;
 
     public ActionLog(string dir)
     {
         _dir = dir; _file = Path.Combine(dir, "openlasso.log");
         Directory.CreateDirectory(dir);
     }
+
+    public string FilePath => _file;
 
     public void Write(int pid, string name, int actionId, string info, string procPath = "", string cmdLine = "")
     {
@@ -107,5 +112,88 @@ public class ActionLog
             }
             catch { return new(); }
         }
+    }
+
+    /// <summary>读取自上次调用以来追加的完整日志行；初始化、轮转或截断时返回文件尾部。</summary>
+    public List<string> ReadNewLines(int maxLines = 40) => ReadNewLines(maxLines, out _);
+
+    /// <summary>读取增量日志，并以 <paramref name="reset"/> 指示调用方是否应丢弃旧缓存。</summary>
+    public List<string> ReadNewLines(int maxLines, out bool reset)
+    {
+        maxLines = Math.Max(1, maxLines);
+        reset = false;
+        lock (_lock)
+        {
+            try
+            {
+                if (!File.Exists(_file))
+                {
+                    reset = _readLength >= 0;
+                    _readOffset = 0;
+                    _readLength = -1;
+                    _readCreationUtc = DateTime.MinValue;
+                    return new();
+                }
+
+                var info = new FileInfo(_file);
+                long length = info.Length;
+                DateTime creation = info.CreationTimeUtc;
+                reset = _readLength < 0 || length < _readOffset || creation != _readCreationUtc;
+                if (reset)
+                {
+                    _readOffset = 0;
+                    var initial = ReadCompleteLines(_file, _readOffset, length, out long consumed);
+                    _readOffset += consumed;
+                    _readLength = length;
+                    _readCreationUtc = creation;
+                    return initial.TakeLast(maxLines).ToList();
+                }
+
+                if (length == _readOffset || length == _readLength)
+                {
+                    _readLength = length;
+                    return new();
+                }
+
+                var lines = ReadCompleteLines(_file, _readOffset, length, out long appended);
+                _readOffset += appended;
+                _readLength = length;
+                return lines.TakeLast(maxLines).ToList();
+            }
+            catch
+            {
+                _readLength = -1;
+                reset = true;
+                return new();
+            }
+        }
+    }
+
+    static List<string> ReadCompleteLines(string path, long offset, long length, out long consumed)
+    {
+        consumed = 0;
+        int available = (int)Math.Max(0, length - offset);
+        if (available == 0) return new();
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        stream.Seek(offset, SeekOrigin.Begin);
+        byte[] bytes = new byte[available];
+        int read = 0;
+        while (read < bytes.Length)
+        {
+            int n = stream.Read(bytes, read, bytes.Length - read);
+            if (n == 0) break;
+            read += n;
+        }
+        if (read == 0) return new();
+
+        int completeBytes = Array.LastIndexOf(bytes, (byte)'\n', read - 1, read);
+        if (completeBytes < 0) return new();
+        completeBytes++;
+        consumed = completeBytes;
+        string text = Encoding.UTF8.GetString(bytes, 0, completeBytes);
+        return text.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
 }

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 
 namespace OpenLasso;
@@ -55,6 +56,55 @@ internal static class Native
 
     // ---------- 进程信息与控制 ----------
     [DllImport("psapi.dll")] internal static extern bool EmptyWorkingSet(IntPtr hProcess);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TOKEN_USER { public SID_AND_ATTRIBUTES User; }
+
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint length, out uint returned);
+
+    /// <summary>读取进程令牌的用户 SID；权限不足或进程退出时返回 null。</summary>
+    public static string ProcessUserSid(int pid)
+    {
+        const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        const uint TOKEN_QUERY = 0x0008;
+        const int TokenUser = 1;
+        const int ERROR_INSUFFICIENT_BUFFER = 122;
+        IntPtr process = IntPtr.Zero, token = IntPtr.Zero, buffer = IntPtr.Zero;
+        try
+        {
+            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (process == IntPtr.Zero || !OpenProcessToken(process, TOKEN_QUERY, out token)) return null;
+            if (GetTokenInformation(token, TokenUser, IntPtr.Zero, 0, out uint size) ||
+                Marshal.GetLastWin32Error() != ERROR_INSUFFICIENT_BUFFER || size == 0) return null;
+            buffer = Marshal.AllocHGlobal((int)size);
+            if (!GetTokenInformation(token, TokenUser, buffer, size, out _)) return null;
+            var user = Marshal.PtrToStructure<TOKEN_USER>(buffer);
+            return user.User.Sid == IntPtr.Zero ? null : new SecurityIdentifier(user.User.Sid).Value;
+        }
+        catch { return null; }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            if (token != IntPtr.Zero) CloseHandle(token);
+            if (process != IntPtr.Zero) CloseHandle(process);
+        }
+    }
+
+    public static bool IsAdministrator()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch { return false; }
+    }
 
     [DllImport("ntdll.dll")] internal static extern int NtSetInformationProcess(IntPtr h, int cls, ref int info, int len);
     internal const int ProcessIoPriority = 0x21; // IO_PRIORITY_HINT: 0=VeryLow 1=Low 2=Normal 3=High

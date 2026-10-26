@@ -8,7 +8,7 @@ static class Program
         if (args.Contains("--selftest")) return SelfTest.Run();
         if (args.Contains("--help"))
         {
-            Console.WriteLine("OpenLasso — 开源进程优化器（Process Lasso 功能复刻）");
+            Console.WriteLine("OpenLasso — 开源进程优化器（兼容 Process Lasso 核心功能）");
             Console.WriteLine("  OpenLasso.exe            启动 GUI（托盘 + 进程管理）");
             Console.WriteLine("  OpenLasso.exe --selftest 无头自检：规则引擎/优先级/亲和性/整理/终止");
             return 0;
