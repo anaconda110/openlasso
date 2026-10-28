@@ -17,16 +17,26 @@ public class IniFile
     }
 
     private readonly List<string> _lines = new();
+    private readonly List<string> _lineEndings = new();
     private readonly List<Entry> _items = new();
     private readonly Encoding _encoding;
     private readonly bool _emitPreamble;
+    private readonly string _defaultLineEnding;
+    private readonly bool _endsWithLineEnding;
 
     public string Path { get; }
 
     public IniFile(string path)
     {
         Path = path;
-        if (!File.Exists(path)) { _encoding = new UTF8Encoding(true); _emitPreamble = true; return; }
+        if (!File.Exists(path))
+        {
+            _encoding = new UTF8Encoding(true);
+            _emitPreamble = true;
+            _defaultLineEnding = "\r\n";
+            _endsWithLineEnding = true;
+            return;
+        }
 
         var bytes = File.ReadAllBytes(path);
         if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
@@ -38,23 +48,58 @@ public class IniFile
         else
         { _encoding = new UTF8Encoding(false); _emitPreamble = false; }
 
-        string text = _encoding.GetString(bytes, _emitPreamble && bytes.Length >= 3 && bytes[0] == 0xEF ? 3 :
-            (_emitPreamble && bytes.Length >= 2 ? 2 : 0), bytes.Length - (_emitPreamble && bytes.Length >= 3 && bytes[0] == 0xEF ? 3 :
-            (_emitPreamble && bytes.Length >= 2 ? 2 : 0)));
-        _lines.AddRange(text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'));
+        int preambleLength = _emitPreamble && bytes.Length >= 3 && bytes[0] == 0xEF ? 3 :
+            (_emitPreamble && bytes.Length >= 2 ? 2 : 0);
+        string text = _encoding.GetString(bytes, preambleLength, bytes.Length - preambleLength);
+        ParseText(text, out _defaultLineEnding, out _endsWithLineEnding);
         RebuildIndex();
     }
 
-    private IniFile(string path, IEnumerable<string> lines, Encoding encoding, bool emitPreamble)
+    private IniFile(string path, IEnumerable<string> lines, IEnumerable<string> lineEndings,
+        Encoding encoding, bool emitPreamble, string defaultLineEnding, bool endsWithLineEnding)
     {
         Path = path;
         _lines.AddRange(lines);
+        _lineEndings.AddRange(lineEndings);
         _encoding = encoding;
         _emitPreamble = emitPreamble;
+        _defaultLineEnding = defaultLineEnding;
+        _endsWithLineEnding = endsWithLineEnding;
+        if (_lines.Count != _lineEndings.Count) throw new InvalidDataException("INI 行与换行索引数量不一致。");
         RebuildIndex();
     }
 
-    public IniFile Clone() => new(Path, _lines, _encoding, _emitPreamble);
+    public IniFile Clone() => new(Path, _lines, _lineEndings, _encoding, _emitPreamble,
+        _defaultLineEnding, _endsWithLineEnding);
+
+    private void ParseText(string text, out string defaultLineEnding, out bool endsWithLineEnding)
+    {
+        defaultLineEnding = "";
+        int start = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            string ending;
+            if (text[i] == '\r')
+            {
+                ending = i + 1 < text.Length && text[i + 1] == '\n' ? "\r\n" : "\r";
+                if (ending == "\r\n") i++;
+            }
+            else if (text[i] == '\n') ending = "\n";
+            else continue;
+
+            if (defaultLineEnding.Length == 0) defaultLineEnding = ending;
+            _lines.Add(text[start..(i - ending.Length + 1)]);
+            _lineEndings.Add(ending);
+            start = i + 1;
+        }
+        if (start < text.Length)
+        {
+            _lines.Add(text[start..]);
+            _lineEndings.Add("");
+        }
+        endsWithLineEnding = text.Length > 0 && (text[^1] == '\r' || text[^1] == '\n');
+        if (defaultLineEnding.Length == 0) defaultLineEnding = "\r\n";
+    }
 
     private void RebuildIndex()
     {
@@ -116,9 +161,10 @@ public class IniFile
         string newLine = key + "=" + value;
         if (sectionLine < 0)
         {
-            if (_lines.Count > 0 && _lines[^1].Length != 0) _lines.Add("");
             _lines.Add("[" + sec + "]");
+            _lineEndings.Add(_defaultLineEnding);
             _lines.Add(newLine);
+            _lineEndings.Add(_defaultLineEnding);
         }
         else
         {
@@ -132,19 +178,29 @@ public class IniFile
             }
             if (lastDataLine > sectionLine) insertAt = lastDataLine + 1;
             _lines.Insert(insertAt, newLine);
+            _lineEndings.Insert(insertAt, _defaultLineEnding);
         }
+        NormalizeFinalLineEnding();
         RebuildIndex();
     }
 
     private int FindSectionLine(string sec)
     {
-        for (int i = 0; i < _lines.Count; i++)
+        for (int i = _lines.Count - 1; i >= 0; i--)
         {
             string syntax = _lines[i].Trim().TrimStart('\uFEFF');
             if (syntax.StartsWith('[') && syntax.EndsWith(']') &&
                 syntax[1..^1].Trim().Equals(sec, StringComparison.OrdinalIgnoreCase)) return i;
         }
         return -1;
+    }
+
+    private void NormalizeFinalLineEnding()
+    {
+        if (_lines.Count == 0) return;
+        for (int i = 0; i < _lines.Count - 1; i++)
+            if (_lineEndings[i].Length == 0) _lineEndings[i] = _defaultLineEnding;
+        _lineEndings[^1] = _endsWithLineEnding ? _defaultLineEnding : "";
     }
 
     /// <summary>逗号分隔对列表："a.exe,v1,b.exe,v2" → [(a.exe,v1),(b.exe,v2)]</summary>
@@ -185,13 +241,17 @@ public class IniFile
         {
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                using (var writer = new StreamWriter(stream, _encoding, 4096, leaveOpen: true))
+                if (_emitPreamble)
                 {
-                    writer.NewLine = "\r\n";
-                    foreach (string line in _lines) writer.WriteLine(line);
-                    writer.Flush();
-                    stream.Flush(flushToDisk: true);
+                    byte[] preamble = _encoding.GetPreamble();
+                    if (preamble.Length > 0) stream.Write(preamble, 0, preamble.Length);
                 }
+                for (int i = 0; i < _lines.Count; i++)
+                {
+                    byte[] line = _encoding.GetBytes(_lines[i] + _lineEndings[i]);
+                    stream.Write(line, 0, line.Length);
+                }
+                stream.Flush(flushToDisk: true);
             }
 
             if (File.Exists(Path))

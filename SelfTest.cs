@@ -272,6 +272,20 @@ static class SelfTest
     static void RunIniChecks(Action<string, bool, string> Check, string dir)
     {
         Directory.CreateDirectory(dir);
+        static byte[] WithBom(Encoding encoding, string text) =>
+            encoding.GetPreamble().Concat(encoding.GetBytes(text)).ToArray();
+        void CheckBytes(string name, byte[] actual, byte[] expected)
+            => Check(name, actual.SequenceEqual(expected), $"实际 {actual.Length} 字节，预期 {expected.Length} 字节");
+        void CheckRoundTrip(string name, byte[] original, bool clone)
+        {
+            string path = Path.Combine(dir, name + ".ini");
+            File.WriteAllBytes(path, original);
+            var ini = new IniFile(path);
+            if (clone) ini = ini.Clone();
+            ini.Save();
+            CheckBytes(name, File.ReadAllBytes(path), original);
+        }
+
         string utf8Path = Path.Combine(dir, "utf8-bom.ini");
         File.WriteAllText(utf8Path, "; 保留注释\r\n# 另一条注释\r\n\r\n[Sample]\r\nKey=one\r\n", new UTF8Encoding(true));
         var utf8 = new IniFile(utf8Path);
@@ -294,6 +308,41 @@ static class SelfTest
         Check("INI：UTF-16 保留编码与内容",
             utf16Bytes.Length >= 2 && utf16Bytes[0] == 0xFF && utf16Bytes[1] == 0xFE &&
             utf16Reloaded.Get("示例", "键") == "新值", "");
+
+        var utf8Bom = new UTF8Encoding(true);
+        var utf8NoBom = new UTF8Encoding(false);
+        CheckRoundTrip("INI：UTF-8 BOM + CRLF + 无末尾换行字节往返",
+            WithBom(utf8Bom, "; 未知内容\r\n[Section]\r\nKey=Value"), clone: false);
+        CheckRoundTrip("INI：UTF-8 无 BOM + LF + 末尾换行克隆往返",
+            utf8NoBom.GetBytes("[Section]\nKey=Value\n\n"), clone: true);
+        CheckRoundTrip("INI：UTF-16BE + 单独 CR + 无末尾换行字节往返",
+            WithBom(Encoding.BigEndianUnicode, "[示例]\r键=值"), clone: false);
+
+        string duplicatePath = Path.Combine(dir, "duplicate.ini");
+        byte[] duplicateOriginal = WithBom(utf8Bom,
+            "; 保留\r\n[Rules]\r\nA=1\r\n[Rules]\r\nA=2\r\n[Other]\r\nA=9");
+        File.WriteAllBytes(duplicatePath, duplicateOriginal);
+        var duplicate = new IniFile(duplicatePath);
+        bool duplicateRead = duplicate.Get("Rules", "A") == "2" && duplicate.Get("Other", "A") == "9";
+        duplicate.Set("Rules", "A", "4");
+        duplicate.Set("Rules", "B", "3");
+        duplicate.Save();
+        byte[] duplicateSaved = File.ReadAllBytes(duplicatePath);
+        string duplicateText = File.ReadAllText(duplicatePath);
+        int firstRules = duplicateText.IndexOf("[Rules]", StringComparison.Ordinal);
+        int secondRules = duplicateText.IndexOf("[Rules]", firstRules + 1, StringComparison.Ordinal);
+        int insertedB = duplicateText.IndexOf("B=3", StringComparison.Ordinal);
+        int otherSection = duplicateText.IndexOf("[Other]", StringComparison.Ordinal);
+        string noCrlf = duplicateText.Replace("\r\n", "");
+        var duplicateReloaded = new IniFile(duplicatePath);
+        Check("INI：重复节与重复键均以最后一处为准",
+            duplicateRead && duplicateReloaded.Get("Rules", "A") == "4" && duplicateReloaded.Get("Other", "A") == "9" &&
+            duplicateText.Contains("A=1") && secondRules > firstRules && insertedB > secondRules && insertedB < otherSection,
+            $"最后一节={secondRules}，新键={insertedB}，下一节={otherSection}");
+        Check("INI：修改后保留 CRLF、BOM 与无末尾换行",
+            duplicateSaved.Length >= 3 && duplicateSaved[0] == 0xEF && duplicateSaved[1] == 0xBB && duplicateSaved[2] == 0xBF &&
+            !noCrlf.Contains('\r') && !noCrlf.Contains('\n') &&
+            duplicateSaved[^1] != (byte)'\r' && duplicateSaved[^1] != (byte)'\n', "");
     }
 
     static void RunTelemetryChecks(Action<string> P, Action<string, bool, string> Check, string dir)
