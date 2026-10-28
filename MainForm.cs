@@ -1,8 +1,6 @@
 using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
-using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 
 namespace OpenLasso;
 
@@ -21,6 +19,8 @@ public class MainForm : Form
     readonly TextBox _logBox = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = UiTheme.MonoFont, BackColor = UiTheme.SurfaceAlt, ForeColor = UiTheme.Text, BorderStyle = BorderStyle.FixedSingle };
     readonly TextBox _infoBox = new() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, Font = UiTheme.MonoFont, BackColor = UiTheme.SurfaceAlt, ForeColor = UiTheme.Text, BorderStyle = BorderStyle.FixedSingle };
     readonly NotifyIcon _tray;
+    readonly Icon _windowIcon;
+    readonly Icon _trayIcon;
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
     readonly ToolStripStatusLabel _lblCpu = new("CPU -"), _lblRam = new("内存 -"), _lblGpu = new("GPU -"),
         _lblPlan = new("电源 -"), _lblPb = new("ProBalance -"), _lblEng = new("引擎 -"),
@@ -31,14 +31,9 @@ public class MainForm : Form
     int _tick;
     long _lastSnapshotSequence = -1;
     DateTime _lastProcessTableRefreshUtc = DateTime.MinValue;
-    int _trayBucket = -1;
-    bool _trayProBalance;
     string _trayText = "";
-    IntPtr _hIcon;
     readonly bool _startHidden;
     volatile bool _allowShow;
-
-    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
     static readonly (string cn, string token, ProcessPriorityClass cls)[] PriTable =
     {
@@ -54,6 +49,9 @@ public class MainForm : Form
         _log = new ActionLog(AppPaths.LogDir);
         _eng = new GovernorEngine(_cfg, _log);
         Text = $"OpenLasso v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)} — 开源进程优化器";
+        _windowIcon = AppIcon.Load();
+        _trayIcon = AppIcon.Load();
+        Icon = _windowIcon;
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(1250, 780);
         MinimumSize = new Size(900, 560);
@@ -61,9 +59,7 @@ public class MainForm : Form
         BuildMenu();
         BuildUi();
         Shown += (s, e) => { InitializeSplitLayout(); UpdateStatusDensity(); };
-        _tray = new NotifyIcon { Text = "OpenLasso", Visible = true, ContextMenuStrip = BuildTrayMenu() };
-        _hIcon = MakeIcon(0);
-        _tray.Icon = Icon.FromHandle(_hIcon);
+        _tray = new NotifyIcon { Text = "OpenLasso", Visible = true, Icon = _trayIcon, ContextMenuStrip = BuildTrayMenu() };
         _tray.DoubleClick += (s, e) => ShowFromTray();
         _timer.Interval = _cfg.UpdateSpeedMs;
         _usageGraph.SamplingInterval = TimeSpan.FromMilliseconds(_cfg.UpdateSpeedMs);
@@ -76,10 +72,11 @@ public class MainForm : Form
             _tray.Visible = false;
             _eng.Dispose();
             _tray.ContextMenuStrip?.Dispose();
-            _tray.Icon?.Dispose();
+            _tray.Icon = null;
             _tray.Dispose();
-            if (_hIcon != IntPtr.Zero) DestroyIcon(_hIcon);
-            _hIcon = IntPtr.Zero;
+            _trayIcon.Dispose();
+            Icon = null;
+            _windowIcon.Dispose();
         };
     }
 
@@ -118,8 +115,8 @@ public class MainForm : Form
             };
             if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase))
             {
-                string entryAssembly = System.Reflection.Assembly.GetEntryAssembly()?.Location;
-                if (string.IsNullOrWhiteSpace(entryAssembly))
+                string entryAssembly = Path.Combine(AppContext.BaseDirectory, "OpenLasso.dll");
+                if (!File.Exists(entryAssembly))
                     throw new InvalidOperationException("无法确定 OpenLasso 程序集路径。");
                 psi.ArgumentList.Add(entryAssembly);
             }
@@ -457,7 +454,7 @@ public class MainForm : Form
 
         _tick++;
         if (detailsVisible && _tick % 3 == 0) RefreshLogView();
-        UpdateTrayIcon(snapshot);
+        UpdateTrayStatus(snapshot);
         SyncPauseText(snapshot);
     }
 
@@ -554,21 +551,9 @@ public class MainForm : Form
         _logBox.ScrollToCaret();
     }
 
-    void UpdateTrayIcon(EngineSnapshot snapshot)
+    void UpdateTrayStatus(EngineSnapshot snapshot)
     {
         int cpu = (int)Math.Round(snapshot.TotalCpu);
-        int bucket = cpu < 40 ? 0 : cpu < 70 ? 1 : 2;
-        if (bucket != _trayBucket || snapshot.ProBalanceActive != _trayProBalance)
-        {
-            IntPtr oldHandle = _hIcon;
-            var oldIcon = _tray.Icon;
-            _hIcon = MakeIcon(cpu);
-            _tray.Icon = Icon.FromHandle(_hIcon);
-            oldIcon?.Dispose();
-            if (oldHandle != IntPtr.Zero) DestroyIcon(oldHandle);
-            _trayBucket = bucket;
-            _trayProBalance = snapshot.ProBalanceActive;
-        }
         string text = $"OpenLasso — CPU {cpu}%  内存 {snapshot.RamLoad:0}%" +
                       (snapshot.ProBalanceActive ? "  [ProBalance]" : "");
         if (text != _trayText)
@@ -576,22 +561,6 @@ public class MainForm : Form
             _tray.Text = text;
             _trayText = text;
         }
-    }
-
-    static IntPtr MakeIcon(int cpu)
-    {
-        using var bmp = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var color = cpu < 40 ? UiTheme.Success : cpu < 70 ? UiTheme.Warning : UiTheme.Danger;
-        using var b = new SolidBrush(color);
-        g.FillRectangle(b, 0, 16 - Math.Max(2, cpu * 16 / 100), 16, 16);
-        using var f = new Font("Segoe UI", 7f, FontStyle.Bold);
-        using var w = new SolidBrush(Color.White);
-        var txt = cpu > 99 ? "99" : cpu.ToString();
-        var sz = g.MeasureString(txt, f);
-        g.DrawString(txt, f, w, Math.Max(0, (16 - sz.Width) / 2), Math.Max(0, (16 - sz.Height) / 2));
-        return bmp.GetHicon();
     }
 
     static string PriName(ProcessPriorityClass p) => p switch

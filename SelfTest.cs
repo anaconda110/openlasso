@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Text;
 
 namespace OpenLasso;
@@ -23,6 +24,7 @@ static class SelfTest
         {
             Directory.CreateDirectory(tempRoot);
             RunParsingChecks(Check);
+            RunIconChecks(Check);
             RunIniChecks(Check, Path.Combine(tempRoot, "ini"));
             RunTelemetryChecks(P, Check, Path.Combine(tempRoot, "telemetry"));
             RunConfigChecks(P, Check, Path.Combine(tempRoot, "config"));
@@ -231,6 +233,40 @@ static class SelfTest
             GovernorEngine.MatchesWatchRule("watch.exe;mode=all;cpu>=50;action=trim", watchProcess) &&
             !GovernorEngine.MatchesWatchRule("watch.exe;mode=all;cpu>=50;mem>800;action=trim", watchProcess) &&
             GovernorEngine.MatchesWatchRule("watch.exe;mode=any;cpu>50;mem>=800;action=trim", watchProcess), "");
+    }
+
+    static void RunIconChecks(Action<string, bool, string> Check)
+    {
+        try
+        {
+            var sizes = new List<int>();
+            using (var stream = typeof(AppIcon).Assembly.GetManifestResourceStream(AppIcon.ResourceName)
+                ?? throw new InvalidOperationException("未找到应用图标资源。"))
+            {
+                using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+                reader.ReadUInt16();
+                ushort type = reader.ReadUInt16();
+                int count = reader.ReadUInt16();
+                for (int i = 0; i < count; i++)
+                {
+                    stream.Position = 6 + i * 16;
+                    int width = stream.ReadByte();
+                    stream.ReadByte();
+                    sizes.Add(width == 0 ? 256 : width);
+                }
+                Check("应用图标：多尺寸 ICO 已嵌入",
+                    type == 1 && sizes.Contains(16) && sizes.Contains(32) && sizes.Contains(256),
+                    $"{count} 个尺寸: {string.Join('/', sizes)}");
+            }
+
+            using var icon = AppIcon.Load();
+            Check("应用图标：窗口图标可加载", icon.Width >= 16 && icon.Height >= 16,
+                $"{icon.Width}x{icon.Height}");
+        }
+        catch (Exception ex)
+        {
+            Check("应用图标：资源与加载检查", false, ex.Message);
+        }
     }
 
     static void RunIniChecks(Action<string, bool, string> Check, string dir)

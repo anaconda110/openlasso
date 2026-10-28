@@ -27,7 +27,7 @@
 | IdleSaver / load-based power switching | ✅ | Switches power schemes by idle time or rolling CPU average |
 | CSV action log | ✅ | Same column layout as the original's log, rotated ×10, compatible action IDs |
 | Config compatibility | ✅ | Reads existing `prolasso.ini`-style INI on first run (sections/keys aligned) |
-| GUI | ✅ | Sortable process table, CPU / GPU / memory usage graph, dynamic tray icon (CPU %), rule & settings editors, headless self-test mode |
+| GUI | ✅ | Sortable process table, CPU / GPU / memory usage graph, consistent static window / taskbar / tray icon, live tray status text, rule & settings editors, headless self-test mode |
 | GPU monitoring | ✅ | Reads the busiest Windows GPU Engine counter through PDH and shows its friendly engine name; CPU and memory monitoring continue to work when unavailable |
 | GPU priorities, responsiveness graph, multi-language, service/session-agent split | ❌ | Out of scope for v1 (see Design notes) |
 
